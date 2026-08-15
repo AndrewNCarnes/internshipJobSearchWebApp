@@ -1,0 +1,116 @@
+import sys
+import os
+import time
+import requests
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import database
+from location_filter import is_us_location, is_internship_title
+
+COMPANY_NAME = "{{COMPANY_NAME}}"
+BOARD_TOKEN = "{{TOKEN}}"
+API_URL = f"https://api.ashbyhq.com/posting-api/job-board/{BOARD_TOKEN}"
+TIMEOUT = 30
+RETRIES = 2
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
+def get_locations(job):
+    """
+    Ashby puts the headline in `location`. Postings open at several sites list
+    them under `secondaryLocations` (each a dict with a `location` field) or
+    `address`. Read them all so a foreign-headline / US-secondary posting is
+    still caught, and vice versa.
+    """
+    parts = []
+    loc = job.get("location")
+    if isinstance(loc, str) and loc.strip():
+        parts.append(loc.strip())
+
+    for sec in job.get("secondaryLocations") or []:
+        if isinstance(sec, dict):
+            v = sec.get("location") or sec.get("locationName") or ""
+            if isinstance(v, str) and v.strip():
+                parts.append(v.strip())
+        elif isinstance(sec, str) and sec.strip():
+            parts.append(sec.strip())
+
+    # remote flag with no city
+    if not parts and job.get("isRemote"):
+        parts.append("Remote")
+
+    seen, out = set(), []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def fetch():
+    last = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(API_URL, headers=HEADERS, timeout=TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last = e
+            if attempt < RETRIES:
+                print(f"[{COMPANY_NAME}] attempt {attempt} failed ({e}); retrying...")
+                time.sleep(3)
+    print(f"Error fetching {COMPANY_NAME}: {last}")
+    return None
+
+
+def get_current_jobs():
+    data = fetch()
+    if data is None:
+        return None
+
+    # Ashby returns {"jobs": [...]}; guard against a shape change so a bad
+    # response can't read as an empty board and wipe stored rows.
+    if not isinstance(data, dict) or "jobs" not in data:
+        print(f"[{COMPANY_NAME}] unexpected response shape; board token may be wrong.")
+        return None
+
+    jobs = {}
+    scanned = 0
+    for job in data.get("jobs", []):
+        scanned += 1
+        title = job.get("title", "")
+        if not is_internship_title(title):
+            continue
+
+        locations = get_locations(job)
+        if not locations:
+            print(f"[{COMPANY_NAME}] no location on posting: {title[:50]}")
+            continue
+        if not any(is_us_location(loc, COMPANY_NAME) for loc in locations):
+            continue
+
+        job_id = str(job.get("id") or job.get("jobId") or job.get("jobUrl") or title)
+        jobs[job_id] = {
+            "title": title,
+            "location": " | ".join(locations),
+            "url": job.get("jobUrl") or job.get("applyUrl") or "",
+        }
+
+    print(f"[{COMPANY_NAME}] scanned {scanned} listings; "
+          f"{len(jobs)} are US internships.")
+    return jobs
+
+
+def run_monitor():
+    print(f"Starting {COMPANY_NAME} USA Internship Check...")
+    current_jobs = get_current_jobs()
+
+    if current_jobs is not None:
+        new_count, deleted_count = database.save_jobs(COMPANY_NAME, current_jobs)
+        if new_count > 0: print(f"[{COMPANY_NAME}] Added {new_count} new internships!")
+        else: print(f"[{COMPANY_NAME}] No new internships.")
+        if deleted_count > 0: print(f"[{COMPANY_NAME}] Removed {deleted_count} dead internships.")
+
+
+if __name__ == "__main__":
+    run_monitor()

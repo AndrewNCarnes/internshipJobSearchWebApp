@@ -1,0 +1,120 @@
+import sys
+import os
+import time
+import requests
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import database
+from location_filter import is_us_location, is_internship_title
+
+COMPANY_NAME = "Hermeus"
+BOARD_TOKEN = "hermeus"
+API_URL = f"https://api.lever.co/v0/postings/{BOARD_TOKEN}?mode=json"
+TIMEOUT = 30      # without this, a stalled connection hangs the whole batch
+RETRIES = 2
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
+def get_locations(job):
+    """
+    Lever keeps the headline location at categories.location, but a posting
+    open at several sites lists them in categories.allLocations. Hermeus is
+    Atlanta-based with work at Jacksonville and Edwards AFB, so a posting can
+    carry more than one site -- reading only the headline drops the rest.
+    """
+    cats = job.get("categories") or {}
+    parts = []
+
+    headline = cats.get("location")
+    if isinstance(headline, str) and headline.strip():
+        parts.append(headline.strip())
+
+    for key in ("allLocations", "locations"):
+        vals = cats.get(key) or job.get(key) or []
+        if isinstance(vals, list):
+            for v in vals:
+                if isinstance(v, str) and v.strip():
+                    parts.append(v.strip())
+
+    # Lever's newer workplaceType field marks remote roles that carry no city
+    if not parts:
+        wt = job.get("workplaceType")
+        if isinstance(wt, str) and wt.lower() == "remote":
+            parts.append("Remote")
+
+    seen, out = set(), []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def fetch():
+    """GET the board, retrying briefly on transient network errors."""
+    last = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(API_URL, headers=HEADERS, timeout=TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last = e
+            if attempt < RETRIES:
+                print(f"[{COMPANY_NAME}] attempt {attempt} failed ({e}); retrying...")
+                time.sleep(3)
+    print(f"Error fetching {COMPANY_NAME}: {last}")
+    return None
+
+
+def get_current_jobs():
+    data = fetch()
+    if data is None:
+        return None          # None (not {}) so run_monitor skips the save
+
+    if not isinstance(data, list):
+        print(f"[{COMPANY_NAME}] unexpected response shape "
+              f"({type(data).__name__}); board token may be wrong.")
+        return None
+
+    jobs = {}
+    scanned = 0
+
+    for job in data:
+        scanned += 1
+        title = job.get("text", "")          # Lever calls the title "text"
+        if not is_internship_title(title):
+            continue
+
+        locations = get_locations(job)
+        if not locations:
+            print(f"[{COMPANY_NAME}] no location on posting: {title[:50]}")
+            continue
+        if not any(is_us_location(loc, COMPANY_NAME) for loc in locations):
+            continue
+
+        jobs[str(job.get("id"))] = {
+            "title": title,
+            "location": " | ".join(locations),
+            "url": job.get("hostedUrl", ""),
+        }
+
+    print(f"[{COMPANY_NAME}] scanned {scanned} listings; "
+          f"{len(jobs)} are US internships.")
+    return jobs
+
+
+def run_monitor():
+    print(f"Starting {COMPANY_NAME} USA Internship Check...")
+    current_jobs = get_current_jobs()
+
+    if current_jobs is not None:
+        new_count, deleted_count = database.save_jobs(COMPANY_NAME, current_jobs)
+        if new_count > 0: print(f"[{COMPANY_NAME}] Added {new_count} new internships!")
+        else: print(f"[{COMPANY_NAME}] No new internships.")
+        if deleted_count > 0: print(f"[{COMPANY_NAME}] Removed {deleted_count} dead internships.")
+
+
+if __name__ == "__main__":
+    run_monitor()
