@@ -8,10 +8,8 @@ import time
 from datetime import datetime, timedelta
 
 from master_runner import run_all_scrapers
-
-from dashboard_add_company import render_add_company_panel   # near your other imports
-
-render_add_company_panel()
+from dashboard_add_company import render_add_company_panel
+from runtime_mode import is_local
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "master_jobs.db")
@@ -74,7 +72,9 @@ def score_tier(score):
     return "unlikely"       # almost certainly a false positive
 
 
-
+# set_page_config must be the first Streamlit command in the script, so no
+# widget or panel may render above it. The add-company panel used to be called
+# before this line.
 st.set_page_config(page_title="Internship Monitor", layout="wide")
 
 # --- heartbeat ------------------------------------------------------------
@@ -112,12 +112,24 @@ with b1:
         st.session_state.show_success_toast = True
         st.rerun()
 with b2:
-    if st.button("🚀 Run Scrapers Now", use_container_width=True):
-        with st.spinner("Scraping job boards... this can take several minutes."):
-            run_all_scrapers()
-        st.cache_data.clear()
-        st.session_state.show_success_toast = True
-        st.rerun()
+    # Scraping only works on the machine that owns the database. On Streamlit
+    # Cloud this would run in an ephemeral container, hit job boards from
+    # Streamlit's IP, fail outright for every Playwright-based scraper, and
+    # write results to a disk that is wiped on the next restart.
+    if is_local():
+        if st.button("🚀 Run Scrapers Now", use_container_width=True):
+            with st.spinner("Scraping job boards... this can take several minutes."):
+                run_all_scrapers()
+            st.cache_data.clear()
+            st.session_state.show_success_toast = True
+            st.rerun()
+
+if not is_local():
+    st.caption("📖 Read-only view — data updates when the local scraper runs.")
+
+# Add-a-company shells out to Playwright, which cannot run on Streamlit Cloud.
+if is_local():
+    render_add_company_panel()
 
 
 @st.cache_data(ttl=60)
@@ -135,7 +147,10 @@ def load_data():
 df = load_data()
 
 if df.empty:
-    st.info("No internships found yet. Click 'Run Scrapers Now' to start scraping!")
+    if is_local():
+        st.info("No internships found yet. Click 'Run Scrapers Now' to start scraping!")
+    else:
+        st.info("No internship data has been published yet.")
     st.stop()
 
 CUTOFF = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
