@@ -1,0 +1,40 @@
+That's exactly right. The split is working perfectly:
+
+Local (localhost:8501): Refresh Data + Run Scrapers Now + the Add-a-Company panel, no read-only caption.
+
+Deployed (internships.streamlit.app): only Refresh Data, the 📖 read-only caption, no Add-a-Company panel.
+
+Same data on both (88 openings, 15 companies), and the sidebar heartbeat reads Active from the status.txt you pushed. The .gitignore did its job — .local_dev stayed off GitHub, so the cloud copy correctly reports itself as deployed.
+
+Keeping it running
+
+Daily, on your PC — one command:
+
+cd "D:\BOTS\Job Search Macro"
+python master_runner.py
+
+Leave that terminal open. It scrapes all 23 companies, pushes the DB, sleeps ~24h, repeats. Closing the window, logging out, or rebooting stops it — just re-run the command.
+
+After the first cycle completes, check for this line:
+
+[git] pushed: data: scraper run 2026-08-15 19:42
+
+That's the confirmation the whole chain works unattended. If you instead see [git] timed out or [git] push failed, the automated push isn't working and the public site will freeze at its current data.
+
+When you change code (new scraper, dashboard tweak), push manually — push_results() only commits the DB and status file, never code:
+
+git add -A
+git commit -m "what you changed"
+git push origin main
+
+Streamlit redeploys automatically within a minute or two.
+
+When adding a company via the dashboard, remember it writes a new file into scrapers/ and edits master_runner.py. Those are code changes, so they need the manual push above to reach the cloud — otherwise the deployed app is running an older scraper list. Not harmful (the cloud doesn't scrape), but the repo drifts from your machine.
+
+What to watch for
+
+The sidebar heartbeat is your health check. If it flips to 🔴 Offline on the deployed site, either master_runner.py stopped on your PC or pushes are failing — over 26 hours without a fresh status.txt.
+
+"95 added in the last 24h" but 88 openings total. That's every row being counted as new, which happens on a first populated run. It should settle to a realistic number tomorrow. If it still says everything is new after a few days, the scrapers are deleting and re-adding rows each cycle rather than recognizing existing ones — worth investigating then.
+
+Optional: Task Scheduler can auto-start master_runner.py at login so reboots cost you nothing. Trigger "At log on," action python, arguments master_runner.py, Start in D:\BOTS\Job Search Macro.
