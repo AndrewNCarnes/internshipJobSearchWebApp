@@ -22,7 +22,6 @@ SCRAPERS = [
     "scrapers/johnson_and_johnson.py",
     "scrapers/kraft_heinz.py",
     "scrapers/l3harris.py",
-    "scrapers/lockheed_martin.py",
     "scrapers/northrop_grumman.py",
     "scrapers/otto_aerospace.py",
     "scrapers/raytheon.py",
