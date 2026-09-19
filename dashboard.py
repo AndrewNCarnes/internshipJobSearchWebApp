@@ -164,7 +164,44 @@ view = df[df["is_new"]] if new_only else df
 if hide_unlikely:
     view = view[view["tier"] != "unlikely"]
 
-if view.empty:
+# --- keyword search -------------------------------------------------------
+# The widget itself is drawn further down (top right, under the counts and
+# above the first card), but its value is needed HERE so the counts and the
+# card grid both reflect it. Streamlit runs top to bottom, so we read the
+# stored value from session_state now and create the widget later with the
+# same key -- on every rerun after a keystroke the value is already there.
+SEARCH_KEY = "job_search"
+
+
+def apply_search(frame, query):
+    """Filter on title + company + location.
+
+    Every term must match (AND), "quoted phrases" are kept whole, and a
+    leading - excludes. Matching is plain text, never regex, so a query like
+    C++ or (Paid) can't raise.
+    """
+    terms = re.findall(r'"[^"]*"|\S+', query)
+    haystack = (frame["title"] + " " + frame["company"] + " "
+                + frame["location"].fillna("")).str.lower()
+    for term in terms:
+        negate = term.startswith("-") and len(term) > 1
+        if negate:
+            term = term[1:]
+        term = term.strip('"').strip().lower()
+        if not term:
+            continue
+        hit = haystack.str.contains(term, regex=False)
+        frame = frame[~hit] if negate else frame[hit]
+        haystack = haystack[frame.index]
+    return frame
+
+
+search_query = str(st.session_state.get(SEARCH_KEY, "")).strip()
+searched = view
+if search_query:
+    view = apply_search(view, search_query)
+
+if searched.empty:
     st.info("Nothing new in the last 24 hours.")
     st.stop()
 
@@ -189,7 +226,26 @@ st.caption(
     f"**{len(view)}** opening{'s' if len(view) != 1 else ''} across "
     f"**{len(stats)}** compan{'ies' if len(stats) != 1 else 'y'}"
     + (f"  ·  🆕 {total_new} added in the last 24h" if total_new else "")
+    + (f"  ·  🔎 matching “{search_query}” of {len(searched)}" if search_query else "")
 )
+
+# The search box itself: top right, under the counts, above the first card.
+_, search_col = st.columns([2, 1])
+with search_col:
+    st.text_input(
+        "Search openings",
+        key=SEARCH_KEY,
+        placeholder="🔎 Search title, company, or location…",
+        label_visibility="collapsed",
+        help="Words are ANDed, \"quoted phrases\" match whole, and -word "
+             "excludes. Example: mechanical -senior \"summer 2027\"",
+    )
+
+if search_query and view.empty:
+    st.warning(f"No openings match “{search_query}”. Try fewer words, or a "
+               f"company, city, or state.")
+    st.stop()
+
 st.write("")
 
 
