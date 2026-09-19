@@ -31,7 +31,8 @@ import time
 from playwright.sync_api import sync_playwright
 
 from location_filter import (is_us_location, is_internship_title,
-                             is_plausible_internship)
+                             is_plausible_internship, classify_location,
+                             is_remote_only)
 
 MAX_PAGES = 150
 PAGE_DELAY = 1.5
@@ -87,21 +88,28 @@ def _find_intern_facet(context, ep, company):
 
 
 def _resolve_locations(context, ep, external_path):
-    """Expand a '9 Locations' posting via its detail endpoint."""
+    """Fetch a posting's detail endpoint. Returns (locations, country) where
+    locations is every site joined by " | " (expands '9 Locations') and country
+    is the primary site's ISO alpha-2 code ("US") or "" if absent.
+    ("", "") on failure."""
     try:
         r = context.request.get(ep["api_base"] + external_path,
                                 headers=ep["headers"])
         if not r.ok:
-            return ""
+            return "", ""
         info = r.json().get("jobPostingInfo", {}) or {}
         parts = []
         primary = info.get("location", "")
         if primary:
             parts.append(primary)
         parts.extend(x for x in (info.get("additionalLocations") or []) if x)
-        return " | ".join(parts)
+        country = ((info.get("jobRequisitionLocation") or {}).get("country")
+                   or info.get("country") or {})
+        code = country.get("alpha2Code") or (
+            "US" if country.get("descriptor") == "United States of America" else "")
+        return " | ".join(parts), code
     except Exception:
-        return ""
+        return "", ""
 
 
 def scrape_workday(company, tenant, site, wd="wd5"):
@@ -171,6 +179,11 @@ def scrape_workday(company, tenant, site, wd="wd5"):
                     if location.strip().lower().endswith("locations"):
                         pending_multi.append((job_id, title, external_path))
                         continue
+                    # Bare site names ("Evendale", "Lynn") carry no state; the
+                    # detail endpoint's structured country settles those.
+                    if classify_location(location) == "unknown":
+                        pending_multi.append((job_id, title, external_path))
+                        continue
                     if is_us_location(location, company):
                         jobs[job_id] = {"title": title, "location": location,
                                         "url": ep["job_base"] + external_path}
@@ -191,17 +204,30 @@ def scrape_workday(company, tenant, site, wd="wd5"):
 
             if pending_multi:
                 print(f"[{company}] resolving {len(pending_multi)} "
-                      f"multi-location posting(s)...")
+                      f"multi-site / bare-city posting(s) via detail endpoint...")
                 for job_id, title, external_path in pending_multi:
-                    resolved = _resolve_locations(context, ep, external_path)
-                    if not resolved:
+                    resolved, country = _resolve_locations(context, ep,
+                                                           external_path)
+                    if not resolved and not country:
                         print(f"[{company}] could not resolve: {title}")
                         continue
-                    if any(is_us_location(part, company)
-                           for part in resolved.split(" | ")):
+                    # Country is the PRIMARY site only; a foreign-primary
+                    # posting can still list a US site among the extras --
+                    # but only a named US place counts then. "Santiago |
+                    # Remote" (GE Vernova, Chile) is a Chilean remote job.
+                    parts = resolved.split(" | ")
+                    if country and country != "US":
+                        parts = [p for p in parts if not is_remote_only(p)]
+                    if country == "US" or any(
+                            classify_location(part) == "us" for part in parts):
+                        if classify_location(resolved) == "unknown":
+                            resolved = f"{resolved}, USA"   # bare city -> readable
                         jobs[job_id] = {"title": title, "location": resolved,
                                         "url": ep["job_base"] + external_path}
-                    time.sleep(1)
+                    elif not country:
+                        print(f"[{company}] location not recognized, "
+                              f"skipping: {resolved!r} ({title})")
+                    time.sleep(0.5)
 
         except Exception as e:
             print(f"[{company}] error scraping Workday API: {e}")

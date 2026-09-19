@@ -71,6 +71,7 @@ def get_current_jobs():
         page = context.new_page()
 
         total_cards = 0
+        failed = False
         try:
             for page_num in range(1, MAX_PAGES + 1):
                 url = SEARCH_URL if page_num == 1 else f"{SEARCH_URL}&p={page_num}"
@@ -82,6 +83,7 @@ def get_current_jobs():
                     if page_num == 1:
                         print(f"[{COMPANY_NAME}] ⚠️  no '{CARD_SELECTOR}' cards on the "
                               f"page -- the site layout probably changed.")
+                        failed = True
                     break
 
                 fresh = 0
@@ -121,9 +123,15 @@ def get_current_jobs():
 
         except Exception as e:
             print(f"Error scraping {COMPANY_NAME} with Playwright: {e}")
+            failed = True
         finally:
             browser.close()
 
+    # A crash mid-walk or a changed layout used to return whatever had been
+    # collected (often {}), which save_jobs treats as the complete list and
+    # prunes every other stored row. Failure must be None.
+    if failed:
+        return None
     return jobs
 
 

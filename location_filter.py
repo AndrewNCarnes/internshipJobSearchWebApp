@@ -54,6 +54,13 @@ INTERNATIONAL_COUNTRIES = [
     "united arab emirates", "uae", "saudi arabia", "qatar", "egypt",
     "south africa", "nigeria", "kenya", "brazil", "brasil", "argentina",
     "chile", "colombia", "peru", "costa rica", "panama", "russia", "ukraine",
+    # added 2026-09: Henkel posts Serbia; the rest close the same gap. Names
+    # that are also US places (Georgia, Jordan, Lebanon...) stay OFF this list.
+    "serbia", "croatia", "slovenia", "bosnia", "montenegro", "north macedonia",
+    "albania", "lithuania", "latvia", "estonia", "luxembourg", "iceland",
+    "morocco", "tunisia", "algeria", "ghana", "pakistan", "bangladesh",
+    "sri lanka", "kazakhstan", "uruguay", "paraguay", "ecuador", "venezuela",
+    "guatemala", "honduras", "el salvador", "dominican republic", "slovakia",
 ]
 
 # Country / province codes, matched uppercase against the raw string.
@@ -143,7 +150,9 @@ US_CITIES = [
     "providence", "portsmouth nh", "arlington va", "alexandria va",
     "reston", "herndon", "chantilly", "mclean", "tysons", "fairfax",
     "quantico", "norfolk", "hampton roads", "newport news", "richmond va",
-    "dmv area", "national capital region",
+    # "national capital region" deliberately NOT here: Metro Manila, Delhi and
+    # Ottawa all use it (Caterpillar's Manila intern passed as DC-area).
+    "dmv area",
 ]
 
 # --- 3. Foreign cities: only consulted if no US state was found ------------
@@ -155,7 +164,7 @@ INTERNATIONAL_CITIES = [
     "hyderabad", "pune", "chennai", "mumbai", "gurgaon", "gurugram", "noida",
     "shanghai", "beijing", "shenzhen", "suzhou", "hong kong", "tokyo",
     "osaka", "seoul", "taipei", "kuala lumpur", "penang", "bangkok",
-    "manila", "jakarta", "ho chi minh", "hanoi", "sydney", "melbourne",
+    "manila", "metro manila", "makati", "taguig", "cebu", "jakarta", "ho chi minh", "hanoi", "sydney", "melbourne",
     "brisbane", "adelaide", "perth", "canberra", "auckland", "wellington",
     "christchurch", "mahia", "warkworth", "munich", "münchen", "berlin",
     "frankfurt", "hamburg", "stuttgart", "erlangen", "nuremberg",
@@ -203,41 +212,59 @@ def _has_us_signal(raw, loc):
     )
 
 
-def is_us_location(location_name, company=""):
-    """Return True if the location looks like it is in the United States."""
+def classify_location(location_name):
+    """Return "us", "foreign", or "unknown" -- is_us_location() without the
+    logging. "unknown" means no signal either way (e.g. a bare "Evendale"),
+    so a scraper with a structured country field can settle it itself."""
     if not location_name:
-        return False
+        return "unknown"
 
     raw = str(location_name).strip()
     loc = raw.lower()
 
     # 0. US places whose names collide with a country
     if _word_match(US_OVERRIDES, loc):
-        return True
+        return "us"
 
     # 1. Foreign country named outright -- absolute veto
     if _word_match(INTERNATIONAL_COUNTRIES, loc):
-        return False
+        return "foreign"
     if _code_match(INTERNATIONAL_CODES, raw) and not _has_us_signal(raw, loc):
-        return False
+        return "foreign"
 
     # 2. Any US state / country signal
     if _has_us_signal(raw, loc):
-        return True
+        return "us"
 
     # 3. Foreign city with no US state attached
     if _word_match(INTERNATIONAL_CITIES, loc):
-        return False
+        return "foreign"
 
     # 4. Remote / flexible
     if _word_match(REMOTE_SIGNALS, loc):
-        return True
+        return "us"
 
-    # 5. Nothing matched -- say so instead of dropping it silently
-    if DEBUG_UNKNOWN:
+    return "unknown"
+
+
+def is_remote_only(location_name):
+    """True if the string's only locating signal is remote/flexible wording,
+    e.g. "Remote" or "Virtual" -- no country, state, or city."""
+    raw = str(location_name or "").strip()
+    loc = raw.lower()
+    return bool(raw) and _word_match(REMOTE_SIGNALS, loc) and not (
+        _has_us_signal(raw, loc) or _word_match(INTERNATIONAL_COUNTRIES, loc)
+        or _word_match(INTERNATIONAL_CITIES, loc))
+
+
+def is_us_location(location_name, company=""):
+    """Return True if the location looks like it is in the United States."""
+    verdict = classify_location(location_name)
+    if verdict == "unknown" and location_name and DEBUG_UNKNOWN:
+        # 5. Nothing matched -- say so instead of dropping it silently
         tag = f"[{company}] " if company else ""
-        print(f"{tag}location not recognized, skipping: {raw!r}")
-    return False
+        print(f"{tag}location not recognized, skipping: {str(location_name).strip()!r}")
+    return verdict == "us"
 
 
 # ===========================================================================

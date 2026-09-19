@@ -30,8 +30,8 @@ SEARCH_PAGE = f"{BASE}/us/en/search-results"
 WIDGETS_URL = f"{BASE}/widgets"
 FALLBACK_REFNUM = "LILLUS"
 
-PAGE_SIZE = 20
-MAX_PAGES = 100          # Lilly is a big board; 100 * 20 = 2000 postings
+PAGE_SIZE = 100          # the widget accepts 100; whole board is ~700 postings
+MAX_PAGES = 30
 PAGE_DELAY = 0.8
 
 TIMEOUT = 30
@@ -85,9 +85,11 @@ def _payload(refnum, start, size):
         "isSliderEnable": False,
         "pageId": "page20",
         "siteType": "external",
-        # Lilly posts thousands of roles worldwide; asking the server for
-        # intern matches keeps this from paging the entire global board.
-        "keywords": "intern",
+        # No keyword: Phenom's keyword search is fuzzy (a search for "intern"
+        # returned "Laboratory Animal Veterinarian" and "Director, Medicinal
+        # Chemistry"), so it can't be trusted to include every internship.
+        # The whole board is ~700 postings -- 7 requests -- so scan all of it.
+        "keywords": "",
         "global": True,
         "selected_fields": {},
         "sort": {"order": "desc", "field": "postedDate"},
@@ -188,7 +190,9 @@ def get_current_jobs():
         start = page * PAGE_SIZE
         payload = _post(refnum, start, PAGE_SIZE)
         if payload is None:
-            return jobs if jobs else None
+            # A partial dict would look like "these are all the jobs" and
+            # save_jobs would prune the rest. Any failure is a failure.
+            return None
 
         batch, batch_total = _refine(payload)
         if batch is None:

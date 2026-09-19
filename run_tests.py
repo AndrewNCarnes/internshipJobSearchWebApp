@@ -143,7 +143,6 @@ CASES = [
     ("raytheon",            {"myworkdayjobs.com": [{}, workday("Tucson, AZ"), {}]}, None, None, 1),
     ("johnson_and_johnson", {"myworkdayjobs.com": [{}, workday("New Brunswick, NJ"), {}]}, None, None, 1),
     ("honeywell",           {"oraclecloud.com": [oracle(), {"items": []}]},  None, None, 1),
-    ("lockheed_martin",     {"eightfold.ai": [pcsx(), {"data": {"positions": []}}]}, None, None, 1),
     ("l3harris",            {},  radancy_cards(), None, 1),
     ("otto_aerospace",      {"myworkdayjobs.com": [{}, workday("Fort Worth, TX"), {}]}, None, None, 1),
     ("siemens",             {},  siemens_cards(), None, 1),

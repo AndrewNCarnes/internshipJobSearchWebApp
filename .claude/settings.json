@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python probe_board.py *)",
+      "Bash(python dry_run.py *)",
+      "PowerShell(python probe_board.py *)",
+      "PowerShell(python dry_run.py *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Select-Object *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(git log *)",
+      "PowerShell(git status *)",
+      "PowerShell(git diff *)",
+      "PowerShell(python --version)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/announce_allowlisted.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

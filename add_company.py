@@ -226,7 +226,7 @@ def generate(company, platform, token_or_detail):
     if not os.path.exists(tmpl_path):
         return None, (f"no template for '{platform}'. Detected but can't auto-generate; "
                       f"this is a Ford/Lockheed-class case needing manual work.")
-    tmpl = open(tmpl_path).read()
+    tmpl = open(tmpl_path, encoding="utf-8").read()
     code = (tmpl.replace("{{COMPANY_NAME}}", company)
                 .replace("{{TOKEN}}", str(token_or_detail)))
     out_path = os.path.join(SCRAPERS, f"{slug(company)}.py")
@@ -292,7 +292,10 @@ def _purge_staging_pyc(staged_path):
 def register_in_master(company):
     mr = os.path.join(BASE, "master_runner.py")
     fname = f"{slug(company)}.py"
-    src = open(mr).read()
+    # utf-8 explicitly: master_runner.py contains emoji, and Windows' default
+    # cp1252 decode crashed here AFTER the smoke test passed -- the scraper was
+    # written but never registered.
+    src = open(mr, encoding="utf-8").read()
 
     m = re.search(r"(SCRAPERS\s*=\s*\[)(.*?)(\])", src, re.S)
     if not m:
@@ -321,7 +324,7 @@ def register_in_master(company):
         new_body += ","
     new_body += f'\n{indent}"{entry}",\n'
 
-    open(mr, "w").write(src[:m.start()] + m.group(1) + new_body + m.group(3)
+    open(mr, "w", encoding="utf-8").write(src[:m.start()] + m.group(1) + new_body + m.group(3)
                         + src[m.end():])
     return f"registered as {entry}"
 
@@ -462,7 +465,7 @@ def main():
     # "<name>.py.staged" is not an importable module path. A bad generate thus
     # never overwrites a known-good <name>.py -- it lands on the staging file.
     staged = os.path.join(SCRAPERS, f"_staging_{slug(args.company)}.py")
-    open(staged, "w").write(code)
+    open(staged, "w", encoding="utf-8").write(code)
     print(f"\n  wrote {os.path.basename(staged)}")
 
     verdict, reason, sample = smoke_test(staged)
