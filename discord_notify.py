@@ -45,8 +45,9 @@ DB_PATH = os.path.join(BASE_DIR, "master_jobs.db")
 WEBHOOK_FILE = os.path.join(BASE_DIR, ".discord_webhook")
 
 DISCORD_LIMIT = 2000        # hard cap per message, enforced by Discord
-SAFE_LIMIT = 1900           # leave room for the header and code fences
-MAX_MESSAGES = 5            # a 300-job first run shouldn't spam 40 posts
+SAFE_LIMIT = 1900           # leave room for the header
+MAX_COMPANIES = 25          # longer than this and it stops being a summary
+DASHBOARD_URL = "https://internships.streamlit.app"
 TIMEOUT = 15
 
 
@@ -80,14 +81,11 @@ def new_jobs_since(since, db_path=DB_PATH):
         return []
 
 
-def _line(title, location, url):
-    loc = (location or "").split(" | ")[0].strip()
-    text = f"• [{title.strip()}](<{url}>)"
-    return f"{text} — {loc}" if loc else text
-
-
 def build_messages(rows):
-    """Group by company and split into <=2000 character messages."""
+    """A SUMMARY of what this run added: totals and a per-company count, never
+    the individual postings. A big run can add hundreds of rows, and listing
+    them buries the channel -- the dashboard is where you read the actual
+    jobs. Always one message, always inside Discord's 2000-character cap."""
     if not rows:
         return []
 
@@ -99,35 +97,17 @@ def build_messages(rows):
               f"across {len(by_company)} "
               f"compan{'ies' if len(by_company) != 1 else 'y'}")
 
-    blocks = []
-    for company, jobs in sorted(by_company.items()):
-        lines = [f"__{company}__ ({len(jobs)})"]
-        lines += [_line(*j) for j in jobs]
-        blocks.append("\n".join(lines))
+    # busiest first: that is the useful signal at a glance
+    ranked = sorted(by_company.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    lines = [f"• {company} — {len(jobs)}" for company, jobs in ranked[:MAX_COMPANIES]]
+    if len(ranked) > MAX_COMPANIES:
+        rest = sum(len(j) for _, j in ranked[MAX_COMPANIES:])
+        lines.append(f"• …{len(ranked) - MAX_COMPANIES} more companies — {rest}")
 
-    messages, current = [], header
-    for block in blocks:
-        # a single company with hundreds of jobs can exceed the cap alone
-        while len(block) > SAFE_LIMIT:
-            cut = block.rfind("\n", 0, SAFE_LIMIT)
-            cut = cut if cut > 0 else SAFE_LIMIT
-            head, block = block[:cut], block[cut:].lstrip("\n")
-            if current:
-                messages.append(current)
-            current = head
-        if len(current) + len(block) + 2 > SAFE_LIMIT:
-            messages.append(current)
-            current = block
-        else:
-            current = f"{current}\n\n{block}" if current else block
-    if current:
-        messages.append(current)
-
-    if len(messages) > MAX_MESSAGES:
-        kept = messages[:MAX_MESSAGES]
-        kept[-1] += f"\n\n…and more — see the dashboard for the full list."
-        messages = kept
-    return messages
+    message = "\n".join([header, "", *lines, "", DASHBOARD_URL])
+    if len(message) > SAFE_LIMIT:                      # belt and braces
+        message = message[:SAFE_LIMIT - 1] + "…"
+    return [message]
 
 
 def _post(url, content):
