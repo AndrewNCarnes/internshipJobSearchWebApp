@@ -1,7 +1,10 @@
 import sys
 import os
+import re
 import time
-from playwright.sync_api import sync_playwright
+
+import requests
+from bs4 import BeautifulSoup
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database
@@ -18,22 +21,25 @@ BASE = "https://jobs.siemens.com"
 #             ("Multiple Locations")
 #   job id    <span class="list-item-jobId">Job ID: 516029</span>
 #
-# Pagination is offset-based: &folderRecordsPerPage=6&folderOffset=6, and a
-# "Next >>" link carries class paginationNextLink. The default page size of 6
-# would mean ~167 requests for the 999+ results a keyword=intern search
-# returns, so the page size is raised and the real value read back from the
-# response rather than assumed.
+# This board is SERVER-RENDERED: plain requests get the same HTML a browser
+# does. It used to be driven through Playwright, which cost ~7s per page --
+# 12+ minutes for a board of 659 results, and it still hit MAX_PAGES and
+# returned a PARTIAL list, which save_jobs would treat as complete and use to
+# prune every posting past page 100. Now: requests + BeautifulSoup (~2.5s per
+# page), the total is read from the page, and an incomplete walk returns None.
 SEARCH_PATH = "/en_US/externaljobs/SearchJobs/intern/"
 
 # Siemens' own Country filter, taken from a real filtered search URL:
 #   42386=[812209]  ->  Country = United States of America
 #   42386_format=17546 accompanies it
-# This is server-side filtering and it cuts the result set from "999+" to 413,
+# This is server-side filtering and it cuts the result set from "999+" to ~660,
 # so the scraper pages a third as far and never sees Cairo or Sao Paulo.
 COUNTRY_FILTER = "42386=%5B812209%5D&42386_format=17546"
-PAGE_SIZE = 100
-MAX_PAGES = 100
-PAGE_DELAY = 1.5
+PAGE_SIZE = 6            # the board ignores folderRecordsPerPage; 6 is forced
+MAX_PAGES = 400          # fuse only: 400 * 6 = 2400 postings
+PAGE_DELAY = 0.4
+TIMEOUT = 40
+RETRIES = 3
 
 # Siemens lists "SkillBridge Internship - Field Service Engineer" style roles.
 # SkillBridge is a Department of Defense transition program for separating
@@ -44,11 +50,17 @@ CARD_SEL = ".article.article--result"
 TITLE_SEL = "h3.article__header__text__title a"
 LOCATION_SELS = [".list-item-location", ".article__header__text__subtitle span"]
 JOBID_SEL = ".list-item-jobId"
-NEXT_SEL = ".paginationNextLink"
 
 # Fallbacks if Siemens reskins the board.
 FALLBACK_CARDS = ["article.article--result", "[class*='article--result']",
                   "article[id^='article--']"]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+}
+RESULT_COUNT = re.compile(r"([\d,]+)\s*\+?\s*results", re.I)
 
 
 def page_url(offset):
@@ -56,145 +68,130 @@ def page_url(offset):
             f"&folderRecordsPerPage={PAGE_SIZE}&folderOffset={offset}")
 
 
-def text_of(el):
-    try:
-        return (el.inner_text() or "").strip()
-    except Exception:
-        return ""
+def _get(offset):
+    last = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(page_url(offset), headers=HEADERS, timeout=TIMEOUT)
+            if r.status_code == 200 and r.text:
+                return BeautifulSoup(r.text, "html.parser")
+            last = f"HTTP {r.status_code}"
+        except requests.RequestException as e:
+            last = str(e)[:150]
+        time.sleep(2 * attempt)
+    print(f"[{COMPANY_NAME}] offset {offset} failed after {RETRIES} tries: {last}")
+    return None
+
+
+def find_cards(soup):
+    for sel in [CARD_SEL] + FALLBACK_CARDS:
+        found = soup.select(sel)
+        if found:
+            return found, sel
+    return [], None
 
 
 def parse_card(card):
-    try:
-        link = card.query_selector(TITLE_SEL) or card.query_selector("a")
-    except Exception:
-        return None
+    link = card.select_one(TITLE_SEL) or card.find("a")
     if not link:
         return None
-
-    title = text_of(link)
-    href = link.get_attribute("href") or ""
+    title = link.get_text(" ", strip=True)
+    href = link.get("href") or ""
     if not title or not href:
         return None
     url = href if href.startswith("http") else BASE + href
 
     location = ""
     for sel in LOCATION_SELS:
-        try:
-            el = card.query_selector(sel)
-        except Exception:
-            el = None
+        el = card.select_one(sel)
         if el:
-            location = text_of(el)
+            # the location is nested city/state/country spans, so joining with
+            # a space gives "Raleigh , North Carolina , United States"
+            location = " ".join(el.get_text(" ", strip=True).split())
+            location = re.sub(r"\s+([,.])", r"\1", location).strip(" ,")
             if location:
                 break
 
-    job_id = ""
-    try:
-        idel = card.query_selector(JOBID_SEL)
-        if idel:
-            job_id = text_of(idel).replace("Job ID:", "").strip()
-    except Exception:
-        pass
+    idel = card.select_one(JOBID_SEL)
+    job_id = (idel.get_text(" ", strip=True).replace("Job ID:", "").strip()
+              if idel else "")
     if not job_id:
         job_id = url.rstrip("/").split("/")[-1]
 
     return job_id, title, location, url
 
 
-def find_cards(page):
-    for sel in [CARD_SEL] + FALLBACK_CARDS:
-        try:
-            found = page.query_selector_all(sel)
-        except Exception:
-            continue
-        if found:
-            return found, sel
-    return [], None
+def total_results(soup):
+    m = RESULT_COUNT.search(soup.get_text(" ", strip=True))
+    return int(m.group(1).replace(",", "")) if m else None
 
 
 def get_current_jobs():
+    """Return {job_id: {title, location, url}} on success, or None on failure."""
     jobs = {}
     seen = set()
-    scanned = 0
+    total = None
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-        ).new_page()
+    for page_num in range(MAX_PAGES):
+        soup = _get(page_num * PAGE_SIZE)
+        if soup is None:
+            return None
 
-        try:
-            print(f"[{COMPANY_NAME}] Loading careers page...")
-            offset = 0
-            step = PAGE_SIZE
+        cards, used = find_cards(soup)
+        if page_num == 0:
+            if not cards:
+                print(f"[{COMPANY_NAME}] no job cards found -- the board layout "
+                      f"changed. Check {page_url(0)} by hand.")
+                return None
+            total = total_results(soup)
+            print(f"[{COMPANY_NAME}] board reports {total} results "
+                  f"(via '{used}').")
+        if not cards:
+            break
 
-            for page_num in range(1, MAX_PAGES + 1):
-                page.goto(page_url(offset), wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(3000)
+        fresh = 0
+        for card in cards:
+            parsed = parse_card(card)
+            if not parsed:
+                continue
+            job_id, title, location, url = parsed
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            fresh += 1
 
-                cards, used = find_cards(page)
-                if not cards:
-                    if page_num == 1:
-                        print(f"[{COMPANY_NAME}] ⚠️  no job cards found -- the board "
-                              f"layout changed. Check {page_url(0)} by hand.")
-                    break
+            if not is_internship_title(title):
+                continue
+            if SKIP_SKILLBRIDGE and "skillbridge" in title.lower():
+                continue
+            if not location:
+                print(f"[{COMPANY_NAME}] no location parsed for: {title[:50]}")
+                continue
+            if is_us_location(location, COMPANY_NAME):
+                jobs[job_id] = {"title": title, "location": location, "url": url}
 
-                if page_num == 1:
-                    # Siemens may cap folderRecordsPerPage; use what it actually
-                    # returned as the paging step so offsets stay aligned.
-                    step = len(cards)
-                    print(f"[{COMPANY_NAME}] {len(cards)} results per page "
-                          f"via '{used}'.")
+        if fresh == 0:                  # same cards re-served: end of the list
+            break
+        if isinstance(total, int) and len(seen) >= total:
+            break
+        if page_num and page_num % 25 == 0:
+            print(f"[{COMPANY_NAME}] {len(seen)} listings scanned | "
+                  f"{len(jobs)} US internships so far")
+        time.sleep(PAGE_DELAY)
+    else:
+        # Ran out of pages before running out of results: the list is
+        # incomplete, and saving it would prune everything past the fuse.
+        print(f"[{COMPANY_NAME}] hit MAX_PAGES ({MAX_PAGES}) -- results "
+              f"incomplete; returning None to protect stored rows.")
+        return None
 
-                fresh = 0
-                for card in cards:
-                    parsed = parse_card(card)
-                    if not parsed:
-                        continue
-                    job_id, title, location, url = parsed
-                    if job_id in seen:
-                        continue
-                    seen.add(job_id)
-                    fresh += 1
-                    scanned += 1
+    if isinstance(total, int) and len(seen) < total * 0.9:
+        print(f"[{COMPANY_NAME}] only scanned {len(seen)}/{total}; "
+              f"treating as failure.")
+        return None
 
-                    if not is_internship_title(title):
-                        continue
-                    if SKIP_SKILLBRIDGE and "skillbridge" in title.lower():
-                        continue
-                    if not location:
-                        print(f"[{COMPANY_NAME}] no location parsed for: {title[:50]}")
-                        continue
-                    if is_us_location(location, COMPANY_NAME):
-                        jobs[job_id] = {"title": title, "location": location, "url": url}
-
-                if fresh == 0:
-                    break
-
-                try:
-                    has_next = bool(page.query_selector(NEXT_SEL))
-                except Exception:
-                    has_next = False
-                if not has_next:
-                    break
-
-                offset += step
-                if page_num % 5 == 0:
-                    print(f"[{COMPANY_NAME}] {scanned} listings scanned | "
-                          f"{len(jobs)} US internships so far")
-                time.sleep(PAGE_DELAY)
-            else:
-                print(f"[{COMPANY_NAME}] ⚠️  hit MAX_PAGES ({MAX_PAGES}) -- "
-                      f"results may be incomplete.")
-
-            print(f"[{COMPANY_NAME}] scanned {scanned} listings; "
-                  f"{len(jobs)} are US internships.")
-
-        except Exception as e:
-            print(f"Error scraping {COMPANY_NAME} with Playwright: {e}")
-        finally:
-            browser.close()
-
+    print(f"[{COMPANY_NAME}] scanned {len(seen)} listings; "
+          f"{len(jobs)} are US internships.")
     return jobs
 
 
@@ -202,11 +199,18 @@ def run_monitor():
     print(f"Starting {COMPANY_NAME} USA Internship Check...")
     current_jobs = get_current_jobs()
 
-    if current_jobs is not None:
-        new_count, deleted_count = database.save_jobs(COMPANY_NAME, current_jobs)
-        if new_count > 0: print(f"[{COMPANY_NAME}] Added {new_count} new internships!")
-        else: print(f"[{COMPANY_NAME}] No new internships.")
-        if deleted_count > 0: print(f"[{COMPANY_NAME}] Removed {deleted_count} dead internships.")
+    if current_jobs is None:
+        print(f"[{COMPANY_NAME}] scrape failed; skipping save to protect "
+              f"stored rows.")
+        return
+
+    new_count, deleted_count = database.save_jobs(COMPANY_NAME, current_jobs)
+    if new_count > 0:
+        print(f"[{COMPANY_NAME}] Added {new_count} new internships!")
+    else:
+        print(f"[{COMPANY_NAME}] No new internships.")
+    if deleted_count > 0:
+        print(f"[{COMPANY_NAME}] Removed {deleted_count} dead internships.")
 
 
 if __name__ == "__main__":

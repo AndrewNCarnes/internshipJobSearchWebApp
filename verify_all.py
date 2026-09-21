@@ -94,17 +94,20 @@ def gh_cards(extra=()):
     return c
 
 def siemens_cards(extra=()):
-    T = "h3.article__header__text__title a"
+    """Siemens is server-rendered and read with requests + BeautifulSoup, so
+    the fixture is real HTML, not fake Playwright elements."""
     def c(title, loc, jid):
-        return H.FakeEl(f"{title}\n{loc}", children={
-            T: H.FakeEl(title, {"href": f"/en_US/externaljobs/JobDetail/{jid}"}),
-            ".list-item-location": H.FakeEl(loc),
-            ".list-item-jobId": H.FakeEl(f"Job ID: {jid}")})
-    out = [c("Mechanical Engineering Intern", "Orlando, FL, United States", "391822"),
-           c("Digital Intern", "Erlangen, Germany", "391823")]
+        return (f'<article class="article article--result">'
+                f'<h3 class="article__header__text__title">'
+                f'<a href="/en_US/externaljobs/JobDetail/{jid}">{title}</a></h3>'
+                f'<span class="list-item-location">{loc}</span>'
+                f'<span class="list-item-jobId">Job ID: {jid}</span></article>')
+    rows = [c("Mechanical Engineering Intern", "Orlando, FL, United States", "391822"),
+            c("Digital Intern", "Erlangen, Germany", "391823")]
     for i, (t, l) in enumerate(extra):
-        out.append(c(t, l, str(600 + i)))
-    return out
+        rows.append(c(t, l, str(600 + i)))
+    # the count the scraper reads to know when it has the whole board
+    return f'<div class="results">{len(rows)} results</div>' + "".join(rows)
 
 def l3_cards(extra=()):
     def c(title, loc, jid):
@@ -195,8 +198,7 @@ def main():
         if name in ("l3harris", "ford", "castelion"):
             H.reset(routes, cards, inter, html_pages=[cards, cards])
         elif name == "siemens":
-            H.reset(routes, cards, inter,
-                    html_by_selector={".article.article--result": cards})
+            H.reset(routes, cards, inter, html_text=[cards])
         else:
             H.reset(routes, cards, inter)
         jobs, _ = quiet(mod.get_current_jobs)
@@ -208,8 +210,7 @@ def main():
         if name in ("l3harris", "ford", "castelion"):
             H.reset(routes, cards, inter, html_pages=[cards, cards])
         elif name == "siemens":
-            H.reset(routes, cards, inter,
-                    html_by_selector={".article.article--result": cards})
+            H.reset(routes, cards, inter, html_text=[cards])
         else:
             H.reset(routes, cards, inter)
         jobs_fp, _ = quiet(mod.get_current_jobs)
@@ -225,7 +226,12 @@ def main():
             if jobs_f is None:
                 C = "None(skip)"      # run_monitor skips save entirely: safest
             elif jobs_f == {}:
-                C = "{} (guarded)"    # database.py refuses to wipe on empty
+                # NOT safe: save_jobs({}) deletes every stored row for the
+                # company. An empty dict is only correct when the board really
+                # is empty; after a failure it is a silent wipe.
+                C = "{} WIPES"
+                problems.append(f"{name}: returns {{}} after a failure -- "
+                                f"save_jobs would delete every stored row")
             else:
                 C = f"LEAK {len(jobs_f)}"
                 problems.append(f"{name}: returns data after a failure")
@@ -238,8 +244,7 @@ def main():
         if name in ("l3harris", "ford", "castelion"):
             H.reset(routes, cards, inter, html_pages=[cards, cards])
         elif name == "siemens":
-            H.reset(routes, cards, inter,
-                    html_by_selector={".article.article--result": cards})
+            H.reset(routes, cards, inter, html_text=[cards])
         else:
             H.reset(routes, cards, inter)
         _, _ = quiet(mod.run_monitor)

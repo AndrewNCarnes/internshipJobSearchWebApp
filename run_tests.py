@@ -109,15 +109,18 @@ def castelion_cards():
             li("R&D Technician", "Midland, Texas, United States", "A2")]
 
 
-def siemens_cards():
-    T = "h3.article__header__text__title a"
+def siemens_html():
+    """Siemens is server-rendered and read with requests + BeautifulSoup, so
+    the fixture is real HTML, not fake Playwright elements."""
     def c(title, loc, jid):
-        return H.FakeEl(f"{title}\n{loc}", children={
-            T: H.FakeEl(title, {"href": f"/en_US/externaljobs/JobDetail/{jid}"}),
-            ".list-item-location": H.FakeEl(loc),
-            ".list-item-jobId": H.FakeEl(f"Job ID: {jid}")})
-    return [c("Mechanical Engineering Intern", "Orlando, FL, United States", "391822"),
+        return (f'<article class="article article--result">'
+                f'<h3 class="article__header__text__title">'
+                f'<a href="/en_US/externaljobs/JobDetail/{jid}">{title}</a></h3>'
+                f'<span class="list-item-location">{loc}</span>'
+                f'<span class="list-item-jobId">Job ID: {jid}</span></article>')
+    rows = [c("Mechanical Engineering Intern", "Orlando, FL, United States", "391822"),
             c("Digital Intern", "Erlangen, Germany", "391823")]
+    return f'<div class="results">{len(rows)} results</div>' + "".join(rows)
 
 
 def pcsx():
@@ -145,7 +148,7 @@ CASES = [
     ("honeywell",           {"oraclecloud.com": [oracle(), {"items": []}]},  None, None, 1),
     ("l3harris",            {},  radancy_cards(), None, 1),
     ("otto_aerospace",      {"myworkdayjobs.com": [{}, workday("Fort Worth, TX"), {}]}, None, None, 1),
-    ("siemens",             {},  siemens_cards(), None, 1),
+    ("siemens",             {},  None, None, 1),
     ("ford",                {},  radancy_cards(), None, 1),
     ("castelion",           {},  castelion_cards(), None, 1),
 ]
@@ -154,7 +157,12 @@ CASES = [
 def run():
     results = []
     for name, routes, cards, intercept, expected in CASES:
-        H.reset(routes, cards, intercept)
+        # Siemens reads HTML through requests; everything else uses the fake
+        # Playwright cards or JSON routes.
+        if name == "siemens":
+            H.reset(routes, cards, intercept, html_text=[siemens_html()])
+        else:
+            H.reset(routes, cards, intercept)
         mod = importlib.import_module(name)
         importlib.reload(mod)
         try:

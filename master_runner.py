@@ -6,6 +6,7 @@ import sys
 import datetime
 
 from git_push import push_results
+from discord_notify import notify_new_jobs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATUS_PATH = os.path.join(BASE_DIR, "status.txt")
@@ -90,13 +91,19 @@ if __name__ == "__main__":
         # 1. Ping the heartbeat so the dashboard knows we are running
         update_heartbeat()
 
-        # 2. Run all the scripts once
+        # 2. Run all the scripts once. Note the time first: the scrapers run as
+        #    subprocesses, so the only record of what they added is the rows'
+        #    own date_added -- "new this run" means "added at or after this".
+        batch_started = datetime.datetime.now()
         run_all_scrapers()
 
         # 3. Publish the fresh database so the deployed dashboard sees it
         push_results()
 
-        # 4. Go to sleep for ~24 hours
+        # 4. Tell Discord what turned up (never raises; no webhook = no-op)
+        notify_new_jobs(batch_started)
+
+        # 5. Go to sleep for ~24 hours
         jitter = random.uniform(82800, 90000)
         hours = round(jitter / 3600, 2)
         print(f"\nMaster runner is going to sleep for {hours} hours...")

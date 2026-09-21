@@ -1,161 +1,135 @@
 import sys
 import os
-import re
 import time
-from playwright.sync_api import sync_playwright
+
+import requests
+from bs4 import BeautifulSoup
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database
 from location_filter import is_us_location, is_internship_title
 
 COMPANY_NAME = "Ford"
-BASE = "https://www.careers.ford.com"
-SEARCH_URL = f"{BASE}/search-jobs?ac=&Country=6252001&State=&k=intern&orgIds=48560"
-MAX_PAGES = 25    # ~19 cards per page; a fuse, not the normal exit
-PAGE_DELAY = 1.5
 
-# careers.ford.com/search-jobs is the same Radancy platform as L3Harris:
-# server-rendered [data-job-id] cards, ?p=N pagination, no jobs API.
+# careers.ford.com is RADANCY, the same platform as Disney and L3Harris, and
+# it serves a JSON endpoint whose "results" field is rendered card HTML.
 #
-# Ford's own filters are applied server-side in SEARCH_URL:
-#   Country=6252001  -> United States (GeoNames id)
-#   orgIds=48560     -> Ford Motor Company
-#   k=intern         -> keyword
-# apply.ford.com (Oracle Recruiting) was the previous target; it serves an
-# incomplete TLS chain and its API rejected requests, so this reads the public
-# careers site instead.
-CARD_SELECTOR = "[data-job-id]"
-FALLBACK_SELECTORS = ["[data-job-id]", "a[href*='/job/']", "li.job-listing",
-                      "[class*='job-listing']", "[class*='search-result']"]
+# This replaces a Playwright version that walked ?p=N pages of the search URL
+# with the site's own filters applied (k=intern&Country=...&orgIds=...). Those
+# filters no longer work: the keyword search matches description text, so
+# "intern" returned 19 postings -- German sales roles among them -- and zero
+# actual internships, while the board holds 805 jobs. Filtering by title
+# ourselves is the same approach every other scraper here uses.
+#
+# The old version also returned whatever it had collected when a page failed,
+# which save_jobs would treat as the complete board and use to prune.
 
-# "PLANO, TX" / "Palm Bay, FL" / "Washington, DC"
-LOCATION_LINE = re.compile(r"^[A-Za-z .'\-]+,\s*[A-Za-z .'\-]{2,}$")
+BASE = "https://www.careers.ford.com"
+API = f"{BASE}/search-jobs/results"
+PAGE_SIZE = 100
+MAX_PAGES = 40
+PAGE_DELAY = 0.8
+TIMEOUT = 40
+RETRIES = 3
+PARAMS = {
+    "ActiveFacetID": 0, "RecordsPerPage": PAGE_SIZE, "Distance": 50,
+    "RadiusUnitType": 0, "Keywords": "", "Location": "", "ShowRadius": "False",
+    "IsPagination": "True", "SearchResultsModuleName": "Search Results",
+    "SearchFiltersModuleName": "Search Filters",
+    "SortCriteria": 0, "SortDirection": 0, "SearchType": 5,
+}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json, text/javascript, */*",
+}
 
 
-def parse_card(card):
-    """
-    Card text arrives as stacked lines:
-        Systems Engineering Intern
-        ENGINEERING|NEW, GRADS
-        PLANO, TX
-    Title is the first line; location is the last line that looks like
-    "City, ST". The middle line is a job category and is ignored.
-    """
-    try:
-        text = card.inner_text() or ""
-        href = card.get_attribute("href") or ""
-        job_id = card.get_attribute("data-job-id") or ""
-    except Exception:
-        return None
+def _get_page(session, page):
+    last = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = session.get(API, params={**PARAMS, "CurrentPage": page},
+                            timeout=TIMEOUT)
+            if r.status_code == 200:
+                data = r.json()
+                if "results" in data:
+                    return data["results"] or ""
+                last = "no results field"
+            else:
+                last = f"HTTP {r.status_code}"
+        except (requests.RequestException, ValueError) as e:
+            last = str(e)[:150]
+        time.sleep(2 * attempt)
+    print(f"[{COMPANY_NAME}] page {page} failed after {RETRIES} tries: {last}")
+    return None
 
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    if not lines:
-        return None
 
-    title = lines[0]
-    location = ""
-    for line in reversed(lines[1:]):
-        if LOCATION_LINE.match(line):
-            location = line
-            break
-
-    if not job_id:
-        # /en/job/plano/systems-engineering-intern/4832/99069057264
-        parts = [p for p in href.split("/") if p]
-        job_id = parts[-1] if parts else title
-
-    url = href if href.startswith("http") else BASE + href
-    return job_id, title, location, url
+def _cards(html):
+    for a in BeautifulSoup(html, "html.parser").select("a[data-job-id]"):
+        h2 = a.find("h2")
+        if not h2:
+            continue
+        loc = a.select_one(".job-location") or a.select_one("[class*='location']")
+        href = a.get("href", "")
+        yield {
+            "id": a["data-job-id"],
+            "title": h2.get_text(" ", strip=True),
+            "location": " ".join((loc.get_text(" ", strip=True) if loc else "").split()),
+            "url": href if href.startswith("http") else BASE + href,
+        }
 
 
 def get_current_jobs():
-    jobs = {}
-    seen_ids = set()
+    """Return {job_id: {title, location, url}} on success, or None on failure."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    jobs, seen = {}, set()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
+    for page in range(1, MAX_PAGES + 1):
+        html = _get_page(session, page)
+        if html is None:
+            return None
+        cards = [c for c in _cards(html) if c["id"] not in seen]
+        if not cards:
+            if page == 1:
+                print(f"[{COMPANY_NAME}] no job cards on page 1; markup changed.")
+                return None
+            break
+        for c in cards:
+            seen.add(c["id"])
+            if not is_internship_title(c["title"]):
+                continue
+            if not c["location"]:
+                print(f"[{COMPANY_NAME}] no location for: {c['title'][:50]}")
+                continue
+            if is_us_location(c["location"], COMPANY_NAME):
+                jobs[c["id"]] = {"title": c["title"], "location": c["location"],
+                                 "url": c["url"]}
+        time.sleep(PAGE_DELAY)
+    else:
+        print(f"[{COMPANY_NAME}] hit MAX_PAGES ({MAX_PAGES}); results incomplete.")
+        return None
 
-        total_cards = 0
-        try:
-            for page_num in range(1, MAX_PAGES + 1):
-                url = SEARCH_URL if page_num == 1 else f"{SEARCH_URL}&p={page_num}"
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                page.wait_for_timeout(2500)
-
-                cards = []
-                for sel in FALLBACK_SELECTORS:
-                    try:
-                        found = page.query_selector_all(sel)
-                    except Exception:
-                        continue
-                    if found:
-                        cards = found
-                        if page_num == 1 and sel != CARD_SELECTOR:
-                            print(f"[{COMPANY_NAME}] using fallback selector '{sel}'.")
-                        break
-
-                if not cards:
-                    if page_num == 1:
-                        print(f"[{COMPANY_NAME}] ⚠️  no '{CARD_SELECTOR}' cards on the "
-                              f"page -- the site layout probably changed.")
-                    break
-
-                fresh = 0
-                for card in cards:
-                    parsed = parse_card(card)
-                    if not parsed:
-                        continue
-                    job_id, title, location, job_url = parsed
-                    if job_id in seen_ids:
-                        continue
-                    seen_ids.add(job_id)
-                    fresh += 1
-                    total_cards += 1
-
-                    if not is_internship_title(title):
-                        continue
-                    if not location:
-                        print(f"[{COMPANY_NAME}] no location parsed for: {title[:50]}")
-                        continue
-                    if is_us_location(location, COMPANY_NAME):
-                        jobs[job_id] = {
-                            "title": title,
-                            "location": location,
-                            "url": job_url,
-                        }
-
-                # every card repeated -> the site ignored ?p and re-served page 1
-                if fresh == 0:
-                    break
-                if page_num % 5 == 0:
-                    print(f"[{COMPANY_NAME}] page {page_num} | {total_cards} cards read "
-                          f"| {len(jobs)} matches so far")
-                time.sleep(PAGE_DELAY)
-
-            print(f"[{COMPANY_NAME}] read {total_cards} listings; "
-                  f"{len(jobs)} are US internships.")
-
-        except Exception as e:
-            print(f"Error scraping {COMPANY_NAME} with Playwright: {e}")
-        finally:
-            browser.close()
-
+    print(f"[{COMPANY_NAME}] scanned {len(seen)} listings; "
+          f"{len(jobs)} are US internships.")
     return jobs
 
 
 def run_monitor():
     print(f"Starting {COMPANY_NAME} USA Internship Check...")
     current_jobs = get_current_jobs()
-
-    if current_jobs is not None:
-        new_count, deleted_count = database.save_jobs(COMPANY_NAME, current_jobs)
-        if new_count > 0: print(f"[{COMPANY_NAME}] Added {new_count} new internships!")
-        else: print(f"[{COMPANY_NAME}] No new internships.")
-        if deleted_count > 0: print(f"[{COMPANY_NAME}] Removed {deleted_count} dead internships.")
+    if current_jobs is None:
+        print(f"[{COMPANY_NAME}] scrape failed; skipping save to protect stored rows.")
+        return
+    new_count, deleted_count = database.save_jobs(COMPANY_NAME, current_jobs)
+    if new_count > 0:
+        print(f"[{COMPANY_NAME}] Added {new_count} new internships!")
+    else:
+        print(f"[{COMPANY_NAME}] No new internships.")
+    if deleted_count > 0:
+        print(f"[{COMPANY_NAME}] Removed {deleted_count} dead internships.")
 
 
 if __name__ == "__main__":

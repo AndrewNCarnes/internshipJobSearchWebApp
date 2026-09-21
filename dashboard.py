@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from master_runner import run_all_scrapers
 from dashboard_add_company import render_add_company_panel
 from runtime_mode import is_local
+from git_push import push_results
+from auth import render_unlock, unlocked
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "master_jobs.db")
@@ -120,6 +122,11 @@ with b2:
         if st.button("🚀 Run Scrapers Now", use_container_width=True):
             with st.spinner("Scraping job boards... this can take several minutes."):
                 run_all_scrapers()
+                # Scraping alone only updates the local database; the deployed
+                # dashboard reads the committed copy, so publish as well --
+                # otherwise results sit here until the scheduled run.
+                st.write("Publishing results...")
+                push_results()
             st.cache_data.clear()
             st.session_state.show_success_toast = True
             st.rerun()
@@ -196,7 +203,7 @@ def apply_search(frame, query):
     return frame
 
 
-search_query = str(st.session_state.get(SEARCH_KEY, "")).strip()
+search_query = str(st.session_state.get(SEARCH_KEY, "")).strip() if unlocked() else ""
 searched = view
 if search_query:
     view = apply_search(view, search_query)
@@ -229,17 +236,27 @@ st.caption(
     + (f"  ·  🔎 matching “{search_query}” of {len(searched)}" if search_query else "")
 )
 
-# The search box itself: top right, under the counts, above the first card.
-_, search_col = st.columns([2, 1])
+# Password box (left) and search box (right), under the counts and above the
+# first card. Searching titles you cannot read is pointless, so the search box
+# only appears once the session is unlocked.
+lock_col, search_col = st.columns([2, 1])
+is_unlocked = unlocked()
+if not is_unlocked:
+    with lock_col:
+        is_unlocked = render_unlock()
+        if is_unlocked:
+            st.rerun()
+
 with search_col:
-    st.text_input(
-        "Search openings",
-        key=SEARCH_KEY,
-        placeholder="🔎 Search title, company, or location…",
-        label_visibility="collapsed",
-        help="Words are ANDed, \"quoted phrases\" match whole, and -word "
-             "excludes. Example: mechanical -senior \"summer 2027\"",
-    )
+    if is_unlocked:
+        st.text_input(
+            "Search openings",
+            key=SEARCH_KEY,
+            placeholder="🔎 Search title, company, or location…",
+            label_visibility="collapsed",
+            help="Words are ANDed, \"quoted phrases\" match whole, and -word "
+                 "excludes. Example: mechanical -senior \"summer 2027\"",
+        )
 
 if search_query and view.empty:
     st.warning(f"No openings match “{search_query}”. Try fewer words, or a "
@@ -320,6 +337,16 @@ for row_start in range(0, len(companies), n_cols):
                 st.caption(f"{core} internship{'s' if core != 1 else ''}"
                            f" · {meta['openings']} listing"
                            f"{'s' if meta['openings'] != 1 else ''}{badge}")
+
+                if not is_unlocked:
+                    # Teaser: the company and its counts stay public, the
+                    # titles, locations and links do not.
+                    st.markdown(
+                        f"<span style='font-size:0.85rem; opacity:0.6;'>🔒 "
+                        f"{meta['openings']} title"
+                        f"{'s' if meta['openings'] != 1 else ''} hidden — enter "
+                        f"the password above</span>", unsafe_allow_html=True)
+                    continue
 
                 # jobs is already sorted by score, so head() is the best
                 # matches -- not merely the most recent.

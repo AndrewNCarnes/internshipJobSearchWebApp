@@ -67,6 +67,7 @@ def extract_locations(job):
 
 def get_current_jobs():
     jobs = {}
+    hard_failure = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -85,6 +86,10 @@ def get_current_jobs():
                 if not response.ok:
                     print(f"Error fetching {COMPANY_NAME}: "
                           f"{response.status} {response.status_text}")
+                    if offset == 0:
+                        # refused on the first request: we have nothing, and
+                        # returning {} would prune every stored row
+                        hard_failure = True
                     break
 
                 data = response.json()
@@ -142,9 +147,15 @@ def get_current_jobs():
 
         except Exception as e:
             print(f"Error scraping {COMPANY_NAME}: {e}")
+            if not jobs:
+                hard_failure = True
         finally:
             browser.close()
 
+    if hard_failure:
+        print(f"[{COMPANY_NAME}] scrape failed; returning None to protect "
+              f"stored rows.")
+        return None
     return jobs
 
 

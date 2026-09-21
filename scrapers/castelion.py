@@ -58,6 +58,7 @@ def get_current_jobs():
     jobs = {}
     seen_ids = set()
     scanned = 0
+    failed = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -78,6 +79,7 @@ def get_current_jobs():
                     if page_num == 1:
                         print(f"[{COMPANY_NAME}] ⚠️  no job listings found at "
                               f"{SEARCH_URL} -- board moved or layout changed.")
+                        failed = True
                     break
 
                 fresh = 0
@@ -113,9 +115,16 @@ def get_current_jobs():
 
         except Exception as e:
             print(f"Error scraping {COMPANY_NAME}: {e}")
+            failed = True
         finally:
             browser.close()
 
+    # A crash mid-walk, or a board whose layout changed, used to return
+    # whatever had been collected (usually {}) -- and save_jobs treats that as
+    # the complete list and prunes every other stored row. Failure is None.
+    if failed:
+        print(f"[{COMPANY_NAME}] scrape failed; returning None to protect stored rows.")
+        return None
     return jobs
 
 

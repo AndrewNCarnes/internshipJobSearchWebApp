@@ -29,14 +29,18 @@ GOTO_RAISES = False     # simulate the page failing to load
 REPLAY_PAYLOAD = None   # post_data seen on intercepted requests
 PAGE_TITLE = ''         # for maintenance-page detection
 PAGE_BODY = ''
+HTML_TEXT = []          # requests.get(...).text pages, served in order
 
 
 # --------------------------------------------------------------------------
 # fake HTTP response
 # --------------------------------------------------------------------------
 class FakeResp:
-    def __init__(self, payload, ok=True, status=200, url=""):
+    def __init__(self, payload, ok=True, status=200, url="", text=""):
         self._payload = payload
+        # Server-rendered boards (Siemens) read .text and parse HTML, rather
+        # than .json(); HTML_TEXT feeds those pages in order.
+        self.text = text
         self.ok = ok
         self.status = status
         self.status_code = status   # requests-style alias
@@ -59,7 +63,15 @@ class FakeResp:
 def _next_payload(url):
     for key, queue in JSON_ROUTES.items():
         if key in url:
-            return queue.pop(0) if queue else {}
+            if not queue:
+                return {}
+            # A failure sentinel is the LAST thing in the queue: keep serving
+            # it instead of popping. A real 403 or dropped connection doesn't
+            # clear itself on the next request, and popping made a failing
+            # board look like an empty one -- which prunes every stored row.
+            if len(queue) == 1 and queue[0] in ("__403__", "__boom__"):
+                return queue[0]
+            return queue.pop(0)
     return {}
 
 
@@ -211,7 +223,12 @@ def install_mocks():
             return FakeResp({}, ok=False, status=403, url=url)
         if p == "__boom__":
             raise RuntimeError("connection reset by peer")
-        return FakeResp(p, url=url)
+        # HTML pages are served in order and the last one repeats, so a
+        # scraper that pages until the list repeats terminates on its own.
+        text = ""
+        if HTML_TEXT:
+            text = HTML_TEXT.pop(0) if len(HTML_TEXT) > 1 else HTML_TEXT[0]
+        return FakeResp(p, url=url, text=text)
 
     req.get = fake_get
     sys.modules["requests"] = req
@@ -219,7 +236,7 @@ def install_mocks():
 
 def reset(json_routes=None, html_cards=None, intercept=None, goto_raises=False,
           replay_payload=None, html_pages=None, page_title="", page_body="",
-          html_by_selector=None):
+          html_by_selector=None, html_text=None):
     global GOTO_RAISES, REPLAY_PAYLOAD
     GOTO_RAISES = goto_raises
     REPLAY_PAYLOAD = replay_payload
@@ -232,5 +249,6 @@ def reset(json_routes=None, html_cards=None, intercept=None, goto_raises=False,
     HTML_PAGES[:] = html_pages or []
     HTML_BY_SELECTOR.clear()
     HTML_BY_SELECTOR.update(html_by_selector or {})
+    HTML_TEXT[:] = html_text or []
     INTERCEPT_PAYLOADS[:] = intercept or []
     LIFECYCLE[:] = []
