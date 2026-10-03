@@ -231,6 +231,28 @@ def install_mocks():
         return FakeResp(p, url=url, text=text)
 
     req.get = fake_get
+
+    class FakeSession:
+        """requests.Session() for scrapers that keep one (Ford, Disney).
+        Same routing as the module-level get, plus the .headers dict they
+        update at construction."""
+        def __init__(self):
+            self.headers = {}
+
+        def get(self, url, headers=None, **kw):
+            return fake_get(url, headers=headers, **kw)
+
+        def post(self, url, **kw):
+            return fake_get(url, **kw)
+
+        def close(self):
+            pass
+
+    req.Session = FakeSession
+    # Scrapers catch requests.RequestException; without it the except clause
+    # raises AttributeError while handling a failure.
+    req.RequestException = type("RequestException", (Exception,), {})
+    req.exceptions = types.SimpleNamespace(RequestException=req.RequestException)
     sys.modules["requests"] = req
 
 

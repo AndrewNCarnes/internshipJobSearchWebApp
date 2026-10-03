@@ -120,6 +120,19 @@ def l3_cards(extra=()):
         out.append(c(t, l, f"x{i}"))
     return out
 
+def ford_json(extra=()):
+    """Ford reads Radancy's JSON endpoint ("results" = rendered card HTML),
+    unlike L3Harris which walks the DOM."""
+    rows = [("Mechanical Engineering Intern", "Orlando, FL", "1"),
+            ("Systems Intern", "Melbourne, Australia", "2"),
+            ("Program Manager", "Orlando, FL", "3")]
+    rows += [(t, l, f"x{i}") for i, (t, l) in enumerate(extra)]
+    html = "".join(
+        f'<a data-job-id="{jid}" href="/job/x/slug/4832/{jid}">'
+        f'<h2>{t}</h2><span class="job-location">{l}</span></a>'
+        for t, l, jid in rows)
+    return {"results": html}
+
 
 def castelion_cards(extra=()):
     # careers-page.com <li> blocks: "Title\nLocation\nApply", with the title
@@ -136,6 +149,7 @@ def castelion_cards(extra=()):
     return out
 
 GH  = "greenhouse.io"; LV = "lever.co"; WD = "myworkdayjobs.com"; OR_ = "oraclecloud.com"
+FORD = "careers.ford.com"
 
 CASES = [
     ("spacex",              lambda e: ({GH: [greenhouse("Hawthorne, CA", e)]}, None, None)),
@@ -152,7 +166,7 @@ CASES = [
     ("l3harris",            lambda e: ({}, l3_cards(e), None)),
     ("otto_aerospace",      lambda e: ({WD: [{}, workday("Fort Worth, TX", e), {}]}, None, None)),
     ("siemens",             lambda e: ({}, siemens_cards(e), None)),
-    ("ford",                lambda e: ({}, l3_cards(e), None)),
+    ("ford",                lambda e: ({FORD: [ford_json(e), {"results": ""}]}, None, None)),
     ("castelion",           lambda e: ({}, castelion_cards(e), None)),
 ]
 
@@ -170,7 +184,7 @@ FAILURE = {
     "l3harris": ({}, [], None, True),
     "otto_aerospace": ({WD: ["__403__"]}, None, None, False),
     "siemens": ({}, [], None, False),
-    "ford": ({}, [], None, True),
+    "ford": ({FORD: ["__403__"]}, None, None, False),
     "castelion": ({}, [], None, True),
 }
 
@@ -195,7 +209,7 @@ def main():
 
         # A. happy path
         routes, cards, inter = build(())
-        if name in ("l3harris", "ford", "castelion"):
+        if name in ("l3harris", "castelion"):
             H.reset(routes, cards, inter, html_pages=[cards, cards])
         elif name == "siemens":
             H.reset(routes, cards, inter, html_text=[cards])
@@ -207,7 +221,7 @@ def main():
 
         # B. false positives
         routes, cards, inter = build(FALSE_POS)
-        if name in ("l3harris", "ford", "castelion"):
+        if name in ("l3harris", "castelion"):
             H.reset(routes, cards, inter, html_pages=[cards, cards])
         elif name == "siemens":
             H.reset(routes, cards, inter, html_text=[cards])
@@ -241,7 +255,7 @@ def main():
 
         # D. integration: run_monitor -> sqlite
         routes, cards, inter = build(())
-        if name in ("l3harris", "ford", "castelion"):
+        if name in ("l3harris", "castelion"):
             H.reset(routes, cards, inter, html_pages=[cards, cards])
         elif name == "siemens":
             H.reset(routes, cards, inter, html_text=[cards])

@@ -31,6 +31,9 @@ import argparse
 from datetime import datetime, timedelta
 from urllib import request as urlrequest, error as urlerror
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scoring import fit_score, fit_label
+
 # Windows consoles default to cp1252, which cannot encode the emoji in the
 # message body -- printing a preview raised UnicodeEncodeError (same trap
 # add_company.py hit). The posted payload is always UTF-8 either way.
@@ -47,6 +50,8 @@ WEBHOOK_FILE = os.path.join(BASE_DIR, ".discord_webhook")
 DISCORD_LIMIT = 2000        # hard cap per message, enforced by Discord
 SAFE_LIMIT = 1900           # leave room for the header
 MAX_COMPANIES = 25          # longer than this and it stops being a summary
+TOP_MATCHES = 5             # postings worth pushing to a phone
+FIT_THRESHOLD = 70          # scoring.fit_score: ~"good" and above
 DASHBOARD_URL = "https://internships.streamlit.app"
 TIMEOUT = 15
 
@@ -81,11 +86,41 @@ def new_jobs_since(since, db_path=DB_PATH):
         return []
 
 
+def _top_matches(rows, limit=TOP_MATCHES, threshold=FIT_THRESHOLD):
+    """The few postings worth pushing to a phone: best fit first, one per
+    company so a single employer's 300-posting dump can't fill the list."""
+    scored = []
+    for company, title, location, url in rows:
+        score = fit_score(title, location)
+        if score >= threshold:
+            scored.append((score, company, title, location, url))
+    scored.sort(key=lambda r: (-r[0], r[1]))
+
+    picked, seen_companies = [], set()
+    for row in scored:
+        if row[1] in seen_companies:
+            continue
+        seen_companies.add(row[1])
+        picked.append(row)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _match_line(score, company, title, location, url):
+    loc = (location or "").split(" | ")[0].strip()
+    # <> around the URL stops Discord from unfurling five link previews
+    line = f"{fit_label(score).upper()} · [{title.strip()}](<{url}>) — {company}"
+    return f"{line} · {loc}" if loc else line
+
+
 def build_messages(rows):
-    """A SUMMARY of what this run added: totals and a per-company count, never
-    the individual postings. A big run can add hundreds of rows, and listing
-    them buries the channel -- the dashboard is where you read the actual
-    jobs. Always one message, always inside Discord's 2000-character cap."""
+    """One message per run: the best few matches with links, then the totals.
+
+    The per-posting list used to be the whole message and buried the channel
+    (a run can add 790 rows). The counts alone were readable but not
+    actionable. This is both: what to click now, and what the run did overall.
+    """
     if not rows:
         return []
 
@@ -97,15 +132,32 @@ def build_messages(rows):
               f"across {len(by_company)} "
               f"compan{'ies' if len(by_company) != 1 else 'y'}")
 
+    matches = _top_matches(rows)
+    if matches:
+        match_block = ["", f"**Best matches for you** (fit {FIT_THRESHOLD}+)"]
+        match_block += [_match_line(*m) for m in matches]
+    else:
+        match_block = ["", f"_No postings scored {FIT_THRESHOLD}+ this run._"]
+
     # busiest first: that is the useful signal at a glance
     ranked = sorted(by_company.items(), key=lambda kv: (-len(kv[1]), kv[0]))
-    lines = [f"• {company} — {len(jobs)}" for company, jobs in ranked[:MAX_COMPANIES]]
-    if len(ranked) > MAX_COMPANIES:
-        rest = sum(len(j) for _, j in ranked[MAX_COMPANIES:])
-        lines.append(f"• …{len(ranked) - MAX_COMPANIES} more companies — {rest}")
 
-    message = "\n".join([header, "", *lines, "", DASHBOARD_URL])
-    if len(message) > SAFE_LIMIT:                      # belt and braces
+    def assemble(company_limit):
+        lines = [f"• {c} — {len(j)}" for c, j in ranked[:company_limit]]
+        if len(ranked) > company_limit:
+            rest = sum(len(j) for _, j in ranked[company_limit:])
+            lines.append(f"• …{len(ranked) - company_limit} more companies — {rest}")
+        return "\n".join([header, *match_block, "", "**By company**", *lines,
+                          "", DASHBOARD_URL])
+
+    # The matches are the point of the message, so when it runs long it is the
+    # company list that gives way, never a match.
+    limit = MAX_COMPANIES
+    message = assemble(limit)
+    while len(message) > SAFE_LIMIT and limit > 3:
+        limit -= 3
+        message = assemble(limit)
+    if len(message) > SAFE_LIMIT:
         message = message[:SAFE_LIMIT - 1] + "…"
     return [message]
 

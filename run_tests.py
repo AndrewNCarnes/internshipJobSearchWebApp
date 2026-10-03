@@ -91,8 +91,24 @@ def html_cards(kind):
     ]
 
 
+def radancy_json(cards=None):
+    """Ford reads Radancy's JSON endpoint, whose "results" field is rendered
+    card HTML -- not the DOM cards L3Harris walks. Returns the payload for one
+    page; a second, empty page ends the walk."""
+    cards = cards or [
+        ("Mechanical Engineering Intern", "Orlando, FL", "1"),
+        ("Systems Intern", "Melbourne, Australia", "2"),
+        ("Program Manager", "Orlando, FL", "3"),
+    ]
+    html = "".join(
+        f'<a data-job-id="{jid}" href="/job/x/slug/4832/{jid}">'
+        f'<h2>{title}</h2><span class="job-location">{loc}</span></a>'
+        for title, loc, jid in cards)
+    return {"results": html}
+
+
 def radancy_cards():
-    """[data-job-id] cards for Radancy sites (L3Harris, Ford)."""
+    """[data-job-id] cards for Radancy sites (L3Harris)."""
     def c(title, loc, jid):
         return H.FakeEl(f"{title}\nENGINEERING\n{loc}",
                         {"href": f"/job/x/slug/4832/{jid}", "data-job-id": jid})
@@ -149,7 +165,7 @@ CASES = [
     ("l3harris",            {},  radancy_cards(), None, 1),
     ("otto_aerospace",      {"myworkdayjobs.com": [{}, workday("Fort Worth, TX"), {}]}, None, None, 1),
     ("siemens",             {},  None, None, 1),
-    ("ford",                {},  radancy_cards(), None, 1),
+    ("ford",   {"careers.ford.com": [radancy_json(), {"results": ""}]}, None, None, 1),
     ("castelion",           {},  castelion_cards(), None, 1),
 ]
 

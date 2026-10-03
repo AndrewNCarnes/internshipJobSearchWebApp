@@ -1,0 +1,1 @@
+{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm gate_test.txt"}, "cwd": "D:/BOTS/Job Search Macro", "session_id": "one-tap-test"}

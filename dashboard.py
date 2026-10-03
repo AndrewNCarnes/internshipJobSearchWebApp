@@ -7,71 +7,48 @@ import os
 import time
 from datetime import datetime, timedelta
 
-from master_runner import run_all_scrapers
+from master_runner import run_all_scrapers, SCRAPERS
 from dashboard_add_company import render_add_company_panel
 from runtime_mode import is_local
 from git_push import push_results
 from auth import render_unlock, unlocked
+from scoring import internship_score, score_tier, fit_score, fit_label
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "master_jobs.db")
 STATUS_PATH = os.path.join(BASE_DIR, "status.txt")
 
 PREVIEW_COUNT = 2   # listings shown on the card before you expand it
+DRY_RUN_ALERT = 3   # consecutive runs with 0 results before a scraper is flagged
 
-# --- how likely is this title an actual internship? -----------------------
-# The scrapers match r'\bintern', which also matches "Internal" and
-# "International" -- 37% of the current database is Internal Audit Managers
-# and International Trade Compliance roles. Scoring sorts those to the bottom
-# instead of letting them take up the visible slots on each card.
-STRONG = re.compile(r"\b(intern|interns|internship|internships|co-op|coop|co op)\b")
-FALSE_FRIEND = re.compile(r"\b(internal|international|internally|internationally)\b")
-SENIORITY = re.compile(
-    r"\b(manager|mgr|director|senior|sr\.?|principal|staff|supervisor|"
-    r"chief|vp|president|executive|head of|trainer|recruiter|recruiting)\b")
-SEASON = re.compile(r"\b(summer|fall|autumn|spring|winter)\b|\b20\d\d\b")
-ADVANCED = re.compile(r"\b(phd|ph\.d|doctoral|postdoc|mba|jd|law|md)\b")
-GRADUATE = re.compile(r"\b(graduate|masters|master's)\b")
-RELEVANT = re.compile(
-    r"\b(mechanical|manufacturing|aerospace|aeronautic|astronautic|propulsion|"
-    r"structures|structural|thermal|design|test|testing|systems|materials|"
-    r"robotics|avionics|mechatronic|industrial|hardware|cad|engineer|"
-    r"engineering|production|quality|integration|flight|vehicle)\b")
+# Scoring lives in scoring.py so this file and discord_notify.py cannot drift
+# apart: internship_score answers "is this a real internship", fit_score
+# answers "is it a good fit for a mechanical engineering undergrad".
 
 
-def internship_score(title):
-    """0-100ish. Higher = more likely a real internship worth your time."""
-    # Underscores and slashes are word characters to regex, so "Program_
-    # Internship" defeats \binternship\b. Normalize separators to spaces
-    # before matching.
-    t = re.sub(r"[_/\\|+&–—-]+", " ", title.lower())
-    score = 0
+def age_text(date_added, now=None):
+    """'today' / 'yesterday' / '6 days ago' from a stored date_added string.
 
-    if STRONG.search(t):
-        score += 100
-    elif FALSE_FRIEND.search(t):
-        return 0          # "International Trade Compliance Manager 3"
-
-    if SENIORITY.search(t):
-        score -= 70       # "Recruiting Coordinator, Intern Program"
-    if ADVANCED.search(t):
-        score -= 35       # PhD/MBA tracks, not a sophomore ME
-    if GRADUATE.search(t):
-        score -= 15
-    if SEASON.search(t):
-        score += 15       # "Summer 2027 ..." reads like a real cycle posting
-    if RELEVANT.search(t):
-        score += 12
-
-    return max(score, 0)
+    date_added is when a scraper FIRST saw the posting, which is the best
+    proxy available for how long it has been open -- boards rarely expose a
+    real posted-on date. An old posting is often already filled.
+    """
+    days = age_days(date_added, now)
+    if days is None:
+        return ""
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"{days} days ago"
 
 
-def score_tier(score):
-    if score >= 100:
-        return "core"       # confident internship
-    if score >= 40:
-        return "maybe"      # internship-ish, or senior-flavoured
-    return "unlikely"       # almost certainly a false positive
+def age_days(date_added, now=None):
+    try:
+        seen = datetime.strptime(str(date_added)[:19], "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    return max(0, ((now or datetime.now()) - seen).days)
 
 
 # set_page_config must be the first Streamlit command in the script, so no
@@ -101,6 +78,15 @@ new_only = st.sidebar.toggle("Only show new (last 24h)")
 hide_unlikely = st.sidebar.toggle("Hide likely false positives", value=True,
     help="Buries titles that only matched on 'Internal' or 'International'.")
 
+AGE_CHOICES = {"Any age": None, "≤ 3 days": 3, "≤ 7 days": 7,
+               "≤ 14 days": 14, "≤ 30 days": 30}
+max_age_label = st.sidebar.select_slider(
+    "Posting age", options=list(AGE_CHOICES), value="Any age",
+    help="Days since a scraper first saw the posting. Boards rarely publish a "
+         "posted-on date, so this is the closest proxy — and an old listing is "
+         "often already filled.")
+max_age = AGE_CHOICES[max_age_label]
+
 st.title("USA Internship Monitor")
 
 if st.session_state.get("show_success_toast"):
@@ -109,7 +95,7 @@ if st.session_state.get("show_success_toast"):
 
 b1, b2, _ = st.columns([1, 1, 4])
 with b1:
-    if st.button("🔄 Refresh Data", use_container_width=True):
+    if st.button("🔄 Refresh Data", width="stretch"):
         st.cache_data.clear()
         st.session_state.show_success_toast = True
         st.rerun()
@@ -119,7 +105,7 @@ with b2:
     # Streamlit's IP, fail outright for every Playwright-based scraper, and
     # write results to a disk that is wiped on the next restart.
     if is_local():
-        if st.button("🚀 Run Scrapers Now", use_container_width=True):
+        if st.button("🚀 Run Scrapers Now", width="stretch"):
             with st.spinner("Scraping job boards... this can take several minutes."):
                 run_all_scrapers()
                 # Scraping alone only updates the local database; the deployed
@@ -140,6 +126,97 @@ if is_local():
 
 
 @st.cache_data(ttl=60)
+def load_health():
+    """Latest run per scraper, plus how many consecutive runs came back with
+    nothing. A scraper that quietly returns 0 forever looks identical to one
+    watching a quiet board -- this is the difference."""
+    if not os.path.exists(DB_PATH):
+        return pd.DataFrame()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        runs = pd.read_sql_query(
+            "SELECT scraper, company, ran_at, status, jobs_found, rows_stored, "
+            "seconds FROM scraper_runs ORDER BY ran_at DESC", conn)
+    except Exception:
+        return pd.DataFrame()       # table not created yet (no batch has run)
+    finally:
+        conn.close()
+    if runs.empty:
+        return runs
+
+    rows = []
+    for scraper, group in runs.groupby("scraper", sort=False):
+        group = group.sort_values("ran_at", ascending=False)
+        latest = group.iloc[0]
+        dry = 0
+        for _, run in group.iterrows():
+            if run["status"] in ("empty", "failed"):
+                dry += 1
+            else:
+                break
+        rows.append({
+            "scraper": scraper.replace("scrapers/", "").replace(".py", ""),
+            "company": latest["company"],
+            "last run": str(latest["ran_at"])[:16],
+            "status": latest["status"],
+            "found": latest["jobs_found"],
+            "stored": latest["rows_stored"],
+            "dry runs": dry,
+            "runs logged": len(group),
+        })
+    return pd.DataFrame(rows)
+
+
+def render_health_panel():
+    health = load_health()
+    if health.empty:
+        st.sidebar.caption("🩺 Scraper health: no runs logged yet — it fills in "
+                           "after the next nightly batch.")
+        return
+
+    failing = health[health["status"] == "failed"]
+    stale = health[(health["status"] == "empty") & (health["dry runs"] >= DRY_RUN_ALERT)]
+    finding = health[health["status"] == "ok"]
+    if len(failing) or len(stale):
+        st.sidebar.error(f"🩺 {len(failing)} failing · {len(stale)} quiet for "
+                         f"{DRY_RUN_ALERT}+ runs")
+    else:
+        # Not "all healthy": a scraper can be fine and still find nothing on a
+        # quiet board, and saying "healthy" would paper over that difference.
+        st.sidebar.success(f"🩺 {len(finding)}/{len(health)} scrapers found jobs "
+                           f"last run")
+
+    unlogged = len(SCRAPERS) - len(health)
+    if unlogged > 0:
+        st.sidebar.caption(f"{unlogged} of {len(SCRAPERS)} scrapers haven't "
+                           f"logged a run yet — they appear after the next batch.")
+
+    with st.sidebar.expander("Scraper health", expanded=bool(len(failing))):
+        def flag(row):
+            """(severity, icon) -- severity sorts, the icon is shown. Sorting
+            on the icon itself would order by codepoint, which is meaningless."""
+            if row["status"] == "failed":
+                return 0, "❌"
+            if row["status"] == "empty" and row["dry runs"] >= DRY_RUN_ALERT:
+                return 1, "⚠️"
+            if row["status"] == "empty":
+                return 2, "·"
+            return 3, "✅"
+
+        table = health.copy()
+        flags = table.apply(flag, axis=1)
+        table.insert(0, "", [f[1] for f in flags])
+        table["_severity"] = [f[0] for f in flags]
+        table = table.sort_values(["_severity", "dry runs", "scraper"],
+                                  ascending=[True, False, True])
+        st.dataframe(table[["", "scraper", "last run", "found", "stored",
+                            "dry runs"]],
+                     hide_index=True, width="stretch")
+        st.caption(f"❌ failed · ⚠️ {DRY_RUN_ALERT}+ runs with 0 results "
+                   f"(check the board by hand) · · one quiet run · ✅ found jobs")
+
+
+@st.cache_data(ttl=60)
 def load_data():
     if not os.path.exists(DB_PATH):
         return pd.DataFrame()
@@ -150,6 +227,11 @@ def load_data():
     conn.close()
     return df
 
+
+# Sidebar order follows call order, so this lands under the filters. It is
+# defined above, hence the call sitting here rather than in the sidebar block.
+st.sidebar.divider()
+render_health_panel()
 
 df = load_data()
 
@@ -164,12 +246,17 @@ CUTOFF = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
 df["is_new"] = df["date_added"] >= CUTOFF
 df["score"] = df["title"].apply(internship_score)
 df["tier"] = df["score"].apply(score_tier)
+df["age"] = df["date_added"].apply(age_days)
+df["age_label"] = df["date_added"].apply(age_text)
+df["fit"] = [fit_score(t, l) for t, l in zip(df["title"], df["location"])]
 # strongest match first; newest wins ties
 df = df.sort_values(["score", "date_added"], ascending=[False, False])
 
 view = df[df["is_new"]] if new_only else df
 if hide_unlikely:
     view = view[view["tier"] != "unlikely"]
+if max_age is not None:
+    view = view[view["age"].notna() & (view["age"] <= max_age)]
 
 # --- keyword search -------------------------------------------------------
 # The widget itself is drawn further down (top right, under the counts and
@@ -307,13 +394,19 @@ def render_job(job):
     st.markdown(f"**[{job['title'].strip()}]({job['url']})**{tag}{warn}")
 
     shown, full = format_location(job["location"])
+    # Age sits on the same line as the location: a 30-day-old posting is
+    # usually filled, and that is worth seeing before clicking.
+    age = job.get("age_label") or ""
+    stale = isinstance(job.get("age"), (int, float)) and job["age"] >= 21
+    age_part = (f" · 🕑 {'⚠️ ' if stale else ''}{age}") if age else ""
     if shown == full:
-        st.caption(f"📍 {shown}")
+        st.caption(f"📍 {shown}{age_part}")
     else:
         # title= gives the full site list on hover without a taller card
         st.markdown(
             f"<span title=\"{html.escape(full, quote=True)}\" "
-            f"style=\"font-size:0.82rem; opacity:0.65;\">📍 {html.escape(shown)}</span>",
+            f"style=\"font-size:0.82rem; opacity:0.65;\">📍 {html.escape(shown)}"
+            f"{html.escape(age_part)}</span>",
             unsafe_allow_html=True,
         )
 

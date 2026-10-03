@@ -1,0 +1,105 @@
+SETUP STEPS — what's left to do by hand
+Written 2026-09-20. Everything else is already built, tested and pushed.
+
+
+====================================================================
+1. TURN ON THE AUTO-MODE FIX  (the only required step)
+====================================================================
+Without this, Claude Code in auto mode can run a banned action (like
+deleting files) BEFORE the approval email reaches you. The script is
+already written and tested; it just isn't registered yet.
+
+  a. Open this file in Notepad:
+         C:\Users\Andre\.claude\settings.json
+
+  b. Find the line that says:
+         "hooks": {
+
+  c. Paste this block directly BELOW that line:
+
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "python \"$HOME/.claude/approval-gate/pre_tool_gate.py\"", "timeout": 1860 } ] }
+    ],
+
+  d. Save, then close and reopen Claude Code.
+
+  To check it worked: type /hooks in Claude Code. You should see both
+  PreToolUse and PermissionRequest listed.
+
+  What it does: every banned action is held until you answer the email.
+  Approve and it proceeds; deny, or ignore it for 30 minutes, and it is
+  blocked. It can only block — it can never approve something on its own.
+
+
+====================================================================
+2. THE APPROVAL SERVER  (optional — gives you ONE-TAP email buttons)
+====================================================================
+Folder: C:\Users\Andre\.claude\approval-gate\
+
+  START:  double-click  start_gate_server.bat
+          No window appears. That's correct — it runs hidden (pythonw).
+          Won't start twice; it checks first.
+
+  STOP:   double-click  stop_gate_server.bat
+
+  RUN IT AT LOGIN:
+          Press Win+R, type:  shell:startup  , press Enter.
+          Drop a SHORTCUT to start_gate_server.bat into that folder.
+          (Right-drag the .bat in → "Create shortcuts here".)
+
+  LOG / CURRENT LINK:  server.log  in the same folder.
+
+  Cost: none. It is a local Python process plus a Cloudflare tunnel.
+  It uses no Claude tokens and never contacts Claude.
+
+  Server RUNNING  -> approval emails have one-tap Approve/Deny/Edit buttons.
+  Server STOPPED  -> the same emails arrive with reply-style buttons
+                     (tap the button, then tap Send). Nothing breaks; the
+                     mailer checks whether the tunnel is alive first.
+
+
+====================================================================
+3. RESTART THE NIGHTLY SCRAPER  (so it posts to Discord)
+====================================================================
+If master_runner.py has been running in a terminal since before
+2026-09-20, it loaded before the Discord notifier existed and will not
+post. Press Ctrl+C in that window, then start it again:
+
+    python master_runner.py
+
+Discord now posts ONE summary message per run: the total, the counts per
+company, and a link to the dashboard. It never lists individual jobs.
+
+
+====================================================================
+4. OPTIONAL, BUT WORTH DOING
+====================================================================
+  * REAL DASHBOARD PASSWORD.
+    Right now it is "123", and that is visible in auth.py in the PUBLIC
+    GitHub repo, so it protects nothing. Set a real one at:
+        share.streamlit.io -> your app -> Settings -> Secrets
+    Add this line (any password you like):
+        app_password = "your-password-here"
+    No code change needed; the app prefers the secret over the fallback.
+
+  * ROTATE THE DISCORD WEBHOOK.
+    The URL passed through the chat transcript. To replace it: Discord ->
+    Server Settings -> Integrations -> Webhooks -> delete the old one,
+    make a new one, copy its URL, and paste it (alone) into:
+        D:\BOTS\Job Search Macro\.discord_webhook
+    That file is gitignored and never leaves your PC.
+
+  * LEFTOVER TEST FILES you can delete any time:
+        D:\BOTS\Job Search Macro\gate_pre_test.json
+        D:\BOTS\Job Search Macro\gate_test.txt
+
+
+====================================================================
+KILL SWITCH — if the approval gate ever gets in the way
+====================================================================
+Create an empty file named  DISABLED  (no extension) in:
+    C:\Users\Andre\.claude\approval-gate\
+Both hooks then step aside and normal permission prompts come back.
+Delete the file to switch the gate back on.
+
+Every decision the gate makes is logged in that folder's audit.jsonl.
